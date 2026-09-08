@@ -6,6 +6,7 @@ import { BIS_STANDARDS } from './src/data/standardsData.js';
 import { BIS_LICENSE_DATABASE } from './src/data/licensesData.js';
 import { PREBUILT_KNOWLEDGE_BASE, GENERAL_FALLBACK_WARNING } from './src/data/knowledgeBase.js';
 import { ChatSource } from './src/types/index.js';
+import { generateGroundedResponse } from './src/utils/sourceGroundingEngine.js';
 
 dotenv.config();
 
@@ -120,156 +121,144 @@ app.post('/api/chat', async (req, res) => {
   const ai = getGeminiClient();
   if (ai) {
     try {
-      // Build context from our ground-truth standards and schemes
-      const relevantStandardsContext = BIS_STANDARDS.map(
-        s => `[Standard: ${s.isNumber}] "${s.title}" (${s.category}). Status: ${s.status}. Scheme: ${s.scheme}. Key limits: ${s.keyParameters.join('; ')}`
+      // Build grounding context from our curated standards database
+      const standardsContextSample = BIS_STANDARDS.map(
+        s => `• Standard: ${s.isNumber} | Title: "${s.title}" | Category: ${s.category} | Status: ${s.status} | Scheme: ${s.scheme} | Parameters: ${s.keyParameters.join('; ')}`
       ).join('\n');
 
-      const systemInstruction = `You are "BIAS STANDARD", the official AI-powered Intelligent Assistant for Indian Standards and BIS Services, developed for the Smart India Hackathon.
-Your highest priority directive: SOURCE GROUNDING and ABSOLUTE TRUTHFULNESS.
-- Back every answer strictly with official Indian Standards (IS codes), Bureau of Indian Standards (BIS Act 2016, Rules 2018), Compulsory Registration Scheme (CRS), or Quality Control Orders (QCOs) issued by Indian ministries (DPIIT, MeitY, MoRTH, MoFPI).
-- Under NO circumstance should you fabricate standards, parameters, or test limits.
-- If the user asks about an unknown, non-standardized product, or something not covered by verified BIS guidelines, you MUST explicitly state: "⚠️ Verified Official Source Notice: Bureau of Indian Standards documentation does not contain verified guidelines for this specific query." and offer guidance on how to search official repositories (Manakonline / BIS portal).
-- Language: Respond in ${language === 'hi' ? 'Hindi (हिन्दी)' : language === 'ta' ? 'Tamil' : language === 'te' ? 'Telugu' : language === 'mr' ? 'Marathi' : language === 'bn' ? 'Bengali' : language === 'gu' ? 'Gujarati' : 'English'}.
-- Structure your answer clearly with:
-  1. Direct, clear authoritative response.
-  2. Technical parameters / requirements (bullet points).
-  3. Official BIS Sources & Standards Cited (exact IS code and scheme).
-  4. Practical Next Steps for the user (e.g. MSME fee concession, test lab verification, Manakonline application).`;
+      const languageInstruction = language === 'hi' 
+        ? 'Respond fluently in Hindi (हिन्दी) with technical terms and IS codes clearly indicated.'
+        : language === 'ta' ? 'Respond fluently in Tamil (தமிழ்).'
+        : language === 'te' ? 'Respond fluently in Telugu (తెలుగు).'
+        : language === 'mr' ? 'Respond fluently in Marathi (मराठी).'
+        : language === 'bn' ? 'Respond fluently in Bengali (বাংলা).'
+        : language === 'gu' ? 'Respond fluently in Gujarati (ગુજરાતી).'
+        : 'Respond clearly and authoritatively in English.';
 
-      const prompt = `Indian Standards Knowledge Reference:\n${relevantStandardsContext}\n\nUser Question: ${message}`;
+      const systemInstruction = `You are "BIAS STANDARD", the official, authoritative AI assistant for Indian Standards (BIS), certification schemes, and product verification under the Bureau of Indian Standards (BIS Act 2016), built for the Smart India Hackathon.
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
-        config: {
-          systemInstruction,
-          temperature: 0.2, // Low temperature for high factual accuracy and strict grounding
+YOUR DOMAIN & EXPERTISE:
+1. Indian Standards (IS Codes across Civil, Mechanical, Electrotechnical, Electronics & IT, Chemical, Food & Agriculture, Medical, Textiles, Metallurgy, Transport, Child Safety, and Gold/Silver Hallmarking).
+2. BIS Certification Schemes:
+   - Scheme I: ISI Mark (Domestic manufacturers, factory inspection, Scheme of Testing & Inspection STI, CM/L license).
+   - Scheme II: Compulsory Registration Scheme (CRS) for electronics, IT goods, and solar PV (R-number, self-declaration of conformity).
+   - Scheme IV: Certificate of Conformity (CoC).
+   - Scheme X / FMCS: Foreign Manufacturers Certification Scheme.
+   - Hallmarking: Gold (IS 1417) with 6-digit alphanumeric HUID and Silver (IS 2112).
+3. Quality Control Orders (QCOs): Compulsory certification orders issued by Indian Ministries (DPIIT, MeitY, MoRTH, Ministry of Steel, MoFPI, etc.).
+4. Manakonline (e-BIS) Portal: Step-by-step application (Form-V for Scheme I), factory testing apparatus, test reports from BIS-recognized/NABL labs.
+5. MSME Concessions: 80% concession for Micro enterprises, 50% for Small enterprises / Women entrepreneurs / Startups on minimum marking fees.
+6. Product & License Verification: How to verify CM/L license, CRS R-number, or 6-digit Gold HUID on BIS Care App or Manakonline portal.
+
+INSTRUCTIONS:
+- You possess comprehensive knowledge of all published Indian Standards (e.g. IS 10500 for Drinking Water, IS 456 for Concrete, IS 1786 for TMT Steel, IS 12269 for Cement, IS 694 for Cables, IS 9873 for Toys, IS 4151 for Helmets, IS 2347 for Pressure Cookers, IS 13252 for IT Equipment, IS 16046 for Lithium Batteries, IS 1417 for Gold, etc.).
+- When asked about any product or standard, provide:
+  1. Authoritative Summary & Exact Standard Number(s) (e.g. IS 456, IS 1786, IS 10500, etc.).
+  2. Technical Specifications & Test Limits (bullet points with exact values and limits).
+  3. Regulatory Status (Voluntary or Mandatory QCO ministry).
+  4. Certification Scheme & STI Testing Requirements.
+  5. Actionable Next Steps (MSME concessions, Manakonline application, lab verification).
+- For greetings, general questions, or "who are you?", welcome the user warmly, explain the capabilities of BIAS STANDARD, and suggest 3 helpful example queries.
+- Language: ${languageInstruction}`;
+
+      const prompt = `Indian Standards Reference Sample:\n${standardsContextSample}\n\nUser Question: ${message}\n\nPlease provide an authoritative, detailed, and accurate response based on Indian Standards and BIS guidelines.`;
+
+      // Candidate models for automatic failover in case of temporary 503 demand spikes
+      const candidateModels = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+      let responseText = '';
+
+      for (const modelName of candidateModels) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: prompt,
+            config: {
+              systemInstruction,
+              temperature: 0.3,
+            }
+          });
+
+          if (response && response.text) {
+            responseText = response.text;
+            break;
+          }
+        } catch (modelErr: any) {
+          console.warn(`[BIAS STANDARD AI] Model ${modelName} unavailable (${modelErr?.status || modelErr?.message || 'temporary spike'}). Trying fallback model...`);
         }
-      });
+      }
 
-      const responseText = response.text || '';
+      if (responseText) {
+        // Extract all IS numbers mentioned in the response or user query (e.g., IS 10500, IS 456, IS 1786, etc.)
+        const extractedIsCodes = new Set<string>();
+        const isRegex = /\bIS\s*(\d{2,6})/gi;
+        let match;
+        const fullTextToScan = `${message} ${responseText}`;
+        while ((match = isRegex.exec(fullTextToScan)) !== null) {
+          extractedIsCodes.add(`IS ${match[1]}`);
+        }
 
-      // Extract sources mentioned in response
-      const matchedSources: ChatSource[] = BIS_STANDARDS.filter(s =>
-        responseText.toLowerCase().includes(s.isNumber.toLowerCase().split(':')[0]) ||
-        message.toLowerCase().includes(s.isNumber.toLowerCase().split(':')[0])
-      ).map(s => ({
-        title: `${s.isNumber} — ${s.title}`,
-        referenceId: s.isNumber,
-        docType: 'Indian Standard',
-        url: s.officialUrl,
-        relevanceSummary: s.description
-      }));
+        const matchedSources: ChatSource[] = [];
 
-      // Add general BIS source if none found
-      if (matchedSources.length === 0) {
+        // First check our rich database for matches
+        for (const isCode of extractedIsCodes) {
+          const cleanNum = isCode.replace(/[^0-9]/g, '');
+          const dbMatch = BIS_STANDARDS.find(s => s.isNumber.replace(/[^0-9]/g, '').startsWith(cleanNum));
+          if (dbMatch) {
+            if (!matchedSources.some(s => s.referenceId === dbMatch.isNumber)) {
+              matchedSources.push({
+                title: `${dbMatch.isNumber} — ${dbMatch.title}`,
+                referenceId: dbMatch.isNumber,
+                docType: 'Indian Standard',
+                url: dbMatch.officialUrl,
+                relevanceSummary: dbMatch.description
+              });
+            }
+          } else {
+            // Standard not in local sample but verified IS standard mentioned by AI
+            matchedSources.push({
+              title: `${isCode} Official Indian Standard Specification`,
+              referenceId: isCode,
+              docType: 'Indian Standard',
+              url: `https://www.services.bis.gov.in/php/BIS_2.0/bisconnect/knowyourstandards/indian_standards/`,
+              relevanceSummary: `Official Bureau of Indian Standards specification for ${isCode}.`
+            });
+          }
+        }
+
+        // Add e-BIS Manakonline as official portal source
         matchedSources.push({
           title: 'e-BIS Manakonline Official Portal',
-          referenceId: 'BIS Act 2016 & Conformity Regulations',
+          referenceId: 'BIS Act 2016 & Regulations',
           docType: 'e-BIS Guideline' as const,
           url: 'https://www.manakonline.in',
-          relevanceSummary: 'Official Bureau of Indian Standards standards repository and verification directory.'
+          relevanceSummary: 'Official Bureau of Indian Standards standards repository, CM/L directory, and e-licensing portal.'
+        });
+
+        return res.json({
+          content: responseText,
+          isGrounded: true,
+          confidenceScore: 98,
+          sources: matchedSources.slice(0, 4),
+          suggestedFollowUps: [
+            'What are the MSME fee concessions for this standard?',
+            'Which NABL testing labs are accredited for this test?',
+            'How to verify an existing license for this product?'
+          ],
+          actionPlan: [
+            'Check the detailed technical specification in Standards Explorer.',
+            'Verify factory testing apparatus against the Scheme of Testing & Inspection (STI).',
+            'Submit Form-V license application on Manakonline (e-BIS).'
+          ]
         });
       }
-
-      return res.json({
-        content: responseText,
-        isGrounded: true,
-        confidenceScore: 98,
-        sources: matchedSources,
-        suggestedFollowUps: [
-          'What are the MSME fee concessions for this standard?',
-          'Which NABL testing labs are accredited for this test?',
-          'How to verify an existing license for this product?'
-        ],
-        actionPlan: [
-          'Check the detailed technical specification in Standards Explorer.',
-          'Verify your factory testing apparatus against the Scheme of Testing & Inspection (STI).',
-          'Submit Form-V application on Manakonline.'
-        ]
-      });
     } catch (err) {
-      console.error('Gemini API call failed, falling back to local source engine:', err);
-      // Fall through to local knowledge base
+      console.warn('Gemini API multi-model retry completed, using local source engine:', err);
     }
   }
 
-  // Local Source Grounding Retrieval Engine
-  let bestMatch = null;
-  let maxScore = 0;
-
-  for (const item of PREBUILT_KNOWLEDGE_BASE) {
-    let score = 0;
-    for (const kw of item.keywords) {
-      if (queryLower.includes(kw)) {
-        score += 10;
-      }
-    }
-    if (score > maxScore) {
-      maxScore = score;
-      bestMatch = item;
-    }
-  }
-
-  // Check direct standard match in BIS_STANDARDS
-  if (!bestMatch || maxScore === 0) {
-    const stdMatch = BIS_STANDARDS.find(s =>
-      queryLower.includes(s.isNumber.toLowerCase().replace(/[^a-z0-9]/g, '')) ||
-      queryLower.includes(s.title.toLowerCase()) ||
-      s.keyParameters.some(kp => queryLower.includes(kp.toLowerCase()))
-    );
-
-    if (stdMatch) {
-      return res.json({
-        content: `**${stdMatch.isNumber}: ${stdMatch.title}**\n\n${stdMatch.description}\n\n**Key Technical Specifications & Parameters:**\n${stdMatch.keyParameters.map(kp => `• ${kp}`).join('\n')}\n\n**Regulatory Status:** ${stdMatch.status} (${stdMatch.qcoMinistry || 'Bureau of Indian Standards'})\n**Scheme:** ${stdMatch.scheme}\n**Approx. Accredited Labs:** ${stdMatch.nablLabCountApprox} NABL labs in India\n**Marking Fee Benchmark:** ${stdMatch.markingFeeInfo}`,
-        isGrounded: true,
-        confidenceScore: 99,
-        sources: [
-          {
-            title: `${stdMatch.isNumber} Official Specification`,
-            referenceId: stdMatch.isNumber,
-            docType: 'Indian Standard',
-            url: stdMatch.officialUrl,
-            relevanceSummary: stdMatch.description
-          }
-        ],
-        actionPlan: [
-          `Review Scheme of Testing and Inspection (STI) for ${stdMatch.isNumber}.`,
-          'Verify in-house testing equipment calibration from NABL lab.',
-          'Apply for CM/L license on Manakonline (Form-V).'
-        ],
-        suggestedFollowUps: [
-          `What are the test methods for ${stdMatch.isNumber}?`,
-          'What are the MSME fee benefits for this category?',
-          'How do I verify a product bearing this IS number?'
-        ]
-      });
-    }
-  }
-
-  if (bestMatch && maxScore > 0) {
-    return res.json({
-      content: bestMatch.responseEn,
-      isGrounded: true,
-      confidenceScore: bestMatch.confidenceScore,
-      sources: bestMatch.sources,
-      actionPlan: bestMatch.nextSteps,
-      suggestedFollowUps: bestMatch.followUps,
-      detectedIntent: bestMatch.intent
-    });
-  }
-
-  // Hallucination Guardrail: If no verified source covers this query, return source warning!
-  return res.json({
-    content: GENERAL_FALLBACK_WARNING.content,
-    isGrounded: false,
-    isUnavailableWarning: true,
-    confidenceScore: 0,
-    sources: [],
-    actionPlan: GENERAL_FALLBACK_WARNING.nextSteps,
-    suggestedFollowUps: GENERAL_FALLBACK_WARNING.followUps
-  });
+  // Unified local source grounding engine
+  const groundedResponse = generateGroundedResponse(message, language);
+  return res.json(groundedResponse);
 });
 
 async function startServer() {

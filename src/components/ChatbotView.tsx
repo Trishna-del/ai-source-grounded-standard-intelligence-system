@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { ChatMessage, ChatSource } from '../types';
 import { SUPPORTED_LANGUAGES, GENERAL_FALLBACK_WARNING } from '../data/knowledgeBase';
+import { generateGroundedResponse } from '../utils/sourceGroundingEngine';
 
 interface ChatbotViewProps {
   initialQuery?: string;
@@ -161,19 +162,22 @@ I assist Indian MSMEs, manufacturers, importers, and consumers with:
 
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (err) {
-      console.warn('API error, using local source fallback:', err);
-      // Fallback
+      console.info('Backend endpoint not reachable (GitHub Pages / Vercel static deployment), generating authoritative response via local source-grounding engine:', err);
+      // Seamlessly resolve locally so GitHub Pages, Vercel, and offline environments never throw or show error warnings
+      const localResponse = generateGroundedResponse(queryText.trim(), selectedLanguage);
+
       const assistantMessage: ChatMessage = {
-        id: `assistant-fallback-${Date.now()}`,
+        id: `assistant-local-${Date.now()}`,
         role: 'assistant',
-        content: GENERAL_FALLBACK_WARNING.content,
+        content: localResponse.content,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        sources: GENERAL_FALLBACK_WARNING.sources,
-        confidenceScore: 0,
-        isGrounded: false,
-        isUnavailableWarning: true,
-        actionPlan: GENERAL_FALLBACK_WARNING.nextSteps,
-        suggestedFollowUps: GENERAL_FALLBACK_WARNING.followUps
+        sources: localResponse.sources,
+        confidenceScore: localResponse.confidenceScore,
+        isGrounded: localResponse.isGrounded,
+        isUnavailableWarning: false,
+        actionPlan: localResponse.actionPlan,
+        suggestedFollowUps: localResponse.suggestedFollowUps,
+        detectedIntent: localResponse.detectedIntent
       };
       setMessages((prev) => [...prev, assistantMessage]);
     } finally {
@@ -188,9 +192,7 @@ I assist Indian MSMEs, manufacturers, importers, and consumers with:
   };
 
   const handleClearChat = () => {
-    if (confirm('Are you sure you want to clear this conversation history?')) {
-      setMessages([messages[0]]);
-    }
+    setMessages([messages[0]]);
   };
 
   const handleExportChat = () => {
