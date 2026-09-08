@@ -1,0 +1,7 @@
+{
+  "name": "BIAS STANDARD",
+  "description": "AI-powered source-grounded intelligent assistant for Indian Standards (BIS), certification schemes, and product verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
